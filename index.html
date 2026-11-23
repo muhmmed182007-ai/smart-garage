@@ -1,0 +1,608 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#14213d">
+<title>الجراج الذكي – الحجز والدفع وتصريح QR</title>
+<!--
+  Smart Garage v2.  Open with  index.html?zone=zone_1   (add ?demo=1 to force local demo)
+  Data model:
+    /zones/{zone}/slots/slotN   = {status, startAt, endAt, paid, owner, overdueSettled}   (PUBLIC, no token)
+    /zones/{zone}/secrets/slotN = {hash}    SHA-256 hex of "zone:N:token"  (NOT readable by clients; ESP32 reads it with admin access)
+    /zones/{zone}/sync/{uid}    = server timestamp (clients use it to align their clock)
+  QR payload: SG:<slot>:<token>.  ESP32 hashes "zone:slot:token" and compares with secrets/slotN/hash.
+  Deploy database.rules.json and set CONFIG.API_KEY (Firebase Web API key) + enable Anonymous sign-in.
+-->
+<style>
+:root{--bg:#f3f6fb;--surface:#fff;--ink:#14213d;--muted:#5a6a82;--line:#dfe6f0;--brand:#0e7cc4;--brand-ink:#fff;--navy:#14213d;--asphalt:#3a4658;--ok:#15803d;--ok-bg:#dcfce7;--rsv:#a16207;--rsv-bg:#fef3c7;--occ:#b91c1c;--occ-bg:#fee2e2;--over:#7f1d1d;--over-bg:#fecaca;--shadow:0 1px 2px rgba(20,33,61,.06),0 4px 14px rgba(20,33,61,.06);color-scheme:light}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0b1220;--surface:#141d30;--ink:#e8eef8;--muted:#9db0c9;--line:#26344d;--brand:#38a9ee;--brand-ink:#06223a;--navy:#0e1830;--asphalt:#0a1120;--ok:#4ade80;--ok-bg:#10341f;--rsv:#fbbf24;--rsv-bg:#3a2c0a;--occ:#f87171;--occ-bg:#3b1616;--over:#fca5a5;--over-bg:#4a1717;--shadow:0 1px 2px rgba(0,0,0,.4);color-scheme:dark}}
+*{box-sizing:border-box}[hidden]{display:none!important}html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:"Segoe UI",Tahoma,"Noto Sans Arabic",system-ui,sans-serif;line-height:1.55;padding-bottom:env(safe-area-inset-bottom,0)}
+header{background:var(--navy);color:#fff;padding:calc(14px + env(safe-area-inset-top,0)) 16px 16px;border-bottom:4px solid var(--brand)}
+.bar{max-width:720px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;gap:12px}
+header h1{margin:0;font-size:19px}header p{margin:2px 0 0;font-size:13px;color:#c3d0e4}
+.conn{display:inline-flex;align-items:center;gap:6px;font-size:12px;background:rgba(255,255,255,.12);padding:5px 10px;border-radius:999px;white-space:nowrap}
+.dot{width:8px;height:8px;border-radius:50%;background:#94a3b8}.conn.live .dot{background:#4ade80}.conn.demo .dot{background:#fbbf24}.conn.err .dot{background:#f87171}
+main{max-width:720px;margin:0 auto;padding:14px 14px 40px;display:grid;gap:14px}
+.banner{background:var(--rsv-bg);color:var(--rsv);border-radius:12px;padding:10px 14px;font-size:13px}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.stat{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px 8px;text-align:center;box-shadow:var(--shadow)}
+.stat b{display:block;font-size:26px;line-height:1.1}.stat span{font-size:12px;color:var(--muted)}
+.stat.ok b{color:var(--ok)}.stat.rsv b{color:var(--rsv)}.stat.occ b{color:var(--occ)}
+h2{margin:6px 2px 0;font-size:15px;color:var(--muted);font-weight:600}
+.lot{background:var(--asphalt);border-radius:18px;padding:16px 14px 14px;box-shadow:var(--shadow)}
+.lot-title{display:flex;justify-content:space-between;color:#cbd5e1;font-size:12px;margin-bottom:10px}
+.bays{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;max-width:460px;margin-inline:auto}
+.bay{aspect-ratio:1/1;border-radius:14px;border:2px solid transparent;padding:8px 4px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;text-align:center;cursor:pointer;position:relative;min-width:0;font:inherit;font-weight:600;line-height:1.25}
+.bay-icon{height:38px;display:flex;align-items:center;justify-content:center}.bay-icon svg{width:34px;height:34px;fill:currentColor}
+.pmark{width:34px;height:34px;border:3px solid currentColor;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:19px;font-weight:800}
+.bay-name{font-size:clamp(17px,5vw,21px);font-weight:800}.bay-state{font-size:clamp(13.5px,3.8vw,15.5px)}.bay-sub{font-size:clamp(12px,3.3vw,14px);opacity:.9;font-weight:500}
+.bay.s-available{background:var(--ok-bg);color:var(--ok)}.bay.s-reserved{background:var(--rsv-bg);color:var(--rsv)}.bay.s-occupied{background:var(--occ-bg);color:var(--occ)}.bay.s-overprice{background:var(--over-bg);color:var(--over);border-color:var(--over)}
+.bay.mine::before{content:"";position:absolute;top:8px;inset-inline-start:8px;width:12px;height:12px;border-radius:50%;background:var(--brand);box-shadow:0 0 0 2px var(--surface)}
+.bay[aria-pressed="true"]{outline:3px solid #fff;outline-offset:2px}
+.lane{margin-top:12px;border-top:2px dashed rgba(255,255,255,.35);padding-top:10px;text-align:center;color:#e2e8f0;font-size:12.5px;font-weight:600}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;justify-content:center;font-size:12px;color:var(--muted)}
+.legend i{display:inline-block;width:11px;height:11px;border-radius:3px;margin-inline-end:5px;vertical-align:-1px}
+.slot{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px;box-shadow:var(--shadow);display:flex;flex-direction:column;gap:10px;border-inline-start:6px solid var(--line)}
+.slot.s-available{border-inline-start-color:var(--ok)}.slot.s-reserved{border-inline-start-color:var(--rsv)}.slot.s-occupied{border-inline-start-color:var(--occ)}.slot.s-overprice{border-inline-start-color:var(--over)}
+.slot-top{display:flex;align-items:center;justify-content:space-between;gap:8px}.slot-top strong{font-size:17px}
+.badge{font-size:12px;font-weight:700;padding:3px 10px;border-radius:999px}
+.s-available .badge{background:var(--ok-bg);color:var(--ok)}.s-reserved .badge{background:var(--rsv-bg);color:var(--rsv)}.s-occupied .badge{background:var(--occ-bg);color:var(--occ)}.s-overprice .badge{background:var(--over-bg);color:var(--over)}
+.info{font-size:13.5px;color:var(--muted);min-height:20px}.info .due{color:var(--over);font-weight:700}
+.mine-tag{font-size:11px;font-weight:700;color:var(--brand);border:1px solid var(--brand);border-radius:6px;padding:1px 7px;margin-inline-start:6px}
+.actions{display:flex;gap:8px;flex-wrap:wrap}.actions button{flex:1 1 auto}
+button{font:inherit;font-weight:600;font-size:14.5px;border-radius:10px;border:1px solid transparent;padding:10px 14px;cursor:pointer;min-height:44px}
+button.primary{background:var(--brand);color:var(--brand-ink)}button.ghost{background:transparent;color:var(--brand);border-color:var(--brand)}button.danger{background:var(--occ);color:#fff}button.quiet{background:transparent;color:var(--muted);border-color:var(--line)}
+button[disabled]{opacity:.55;cursor:not-allowed}
+:focus-visible{outline:3px solid var(--brand);outline-offset:2px}
+.note{font-size:12.5px;color:var(--muted)}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px;box-shadow:var(--shadow)}
+.tools{font-size:13px}.tools summary{cursor:pointer;font-weight:600;color:var(--muted)}
+.tool-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:10px}.tool-row span{min-width:64px;font-weight:600}.tool-row button{min-height:36px;padding:6px 10px;font-size:12.5px}
+footer{max-width:720px;margin:0 auto;padding:0 14px 24px;display:flex;gap:8px;flex-wrap:wrap}footer button{font-size:13px;min-height:38px}
+.overlay{position:fixed;inset:0;background:rgba(8,14,28,.55);display:flex;align-items:flex-end;justify-content:center;z-index:20}
+.sheet{background:var(--surface);color:var(--ink);width:100%;max-width:520px;border-radius:18px 18px 0 0;padding:18px 18px calc(18px + env(safe-area-inset-bottom,0));max-height:92vh;overflow:auto}
+@media(min-width:600px){.overlay{align-items:center;padding:20px}.sheet{border-radius:18px}}
+.sheet h3{margin:0 0 4px;font-size:18px}.sheet .sub{margin:0 0 14px;color:var(--muted);font-size:13.5px}
+.field{display:grid;gap:6px;margin-bottom:12px}.field label{font-size:13px;color:var(--muted);font-weight:600}
+select,input[type=url],input[type=text]{font:inherit;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--ink);width:100%;min-height:44px}
+input[type=url],input[type=text]{direction:ltr;text-align:left}
+.seg{display:grid;grid-template-columns:1fr 1fr;gap:6px;background:var(--bg);padding:4px;border-radius:12px;border:1px solid var(--line)}
+.seg button{background:transparent;color:var(--muted);border-radius:9px}.seg button[aria-pressed="true"]{background:var(--brand);color:var(--brand-ink)}
+.price{display:flex;justify-content:space-between;align-items:center;background:var(--bg);border-radius:12px;padding:12px 14px;margin:4px 0 14px;font-weight:600}.price b{font-size:22px;color:var(--brand)}
+.sheet-actions{display:flex;gap:8px}.sheet-actions button{flex:1}
+.qrbox{background:#fff;border-radius:14px;padding:8px;width:min(260px,70vw);margin:6px auto 12px;border:1px solid var(--line)}.qrbox svg{display:block;width:100%;height:auto}
+.code{text-align:center;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:20px;font-weight:700;letter-spacing:1px;direction:ltr;margin-bottom:4px}.center{text-align:center}
+.toast{position:fixed;inset-inline:0;top:calc(12px + env(safe-area-inset-top,0));display:flex;justify-content:center;z-index:40;pointer-events:none}
+.toast span{background:var(--navy);color:#fff;padding:10px 16px;border-radius:12px;font-size:14px;max-width:92vw}.toast.bad span{background:var(--occ)}
+.skeleton{border-radius:14px;background:linear-gradient(90deg,var(--line),var(--surface),var(--line));background-size:200% 100%;animation:sk 1.2s linear infinite;aspect-ratio:1/1}
+@keyframes sk{to{background-position:-200% 0}}
+@media(prefers-reduced-motion:reduce){.skeleton{animation:none}}
+</style>
+</head>
+<body>
+<header><div class="bar"><div><h1>الجراج الذكي المفتوح</h1><p id="zoneLine"></p></div>
+<span id="conn" class="conn"><span class="dot"></span><span id="connText">جارٍ الاتصال</span></span></div></header>
+<main>
+  <div id="banner" class="banner" hidden></div>
+  <section class="stats" aria-label="ملخص الأماكن">
+    <div class="stat ok"><b id="nAvail">–</b><span>متاح</span></div>
+    <div class="stat rsv"><b id="nRsv">–</b><span>محجوز</span></div>
+    <div class="stat occ"><b id="nOcc">–</b><span>مشغول</span></div>
+  </section>
+  <h2>خريطة الجراج – اضغط على مكان أخضر للحجز</h2>
+  <section class="lot" aria-label="خريطة الجراج">
+    <div class="lot-title"><span>الباكيات</span><span>المنطقة <span id="lotZone"></span></span></div>
+    <div id="bays" class="bays" aria-live="polite"><div class="skeleton"></div><div class="skeleton"></div></div>
+    <div class="lane">ممر السيارات – البوابة الرئيسية</div>
+  </section>
+  <div class="legend"><span><i style="background:var(--ok)"></i>متاح</span><span><i style="background:var(--rsv)"></i>محجوز</span><span><i style="background:var(--occ)"></i>مشغول</span><span><i style="background:var(--over)"></i>تجاوز الوقت</span></div>
+  <div id="detail" hidden></div>
+  <p class="note">الذراع مغلق دائماً حتى لو كان المكان أخضر؛ يُفتح فقط بعد الدفع ومسح كود QR الخاص بك بكاميرا الهاتف عند المدخل.</p>
+  <details id="tools" class="card tools" hidden>
+    <summary>أدوات التجربة (تحاكي الـ ESP32)</summary><div id="toolRows"></div>
+    <div class="tool-row"><button class="quiet" id="resetDemo" type="button">إعادة ضبط التجربة</button></div>
+  </details>
+</main>
+<footer>
+  <button class="quiet" id="recoverBtn" type="button">استرجاع حجز</button>
+  <button class="quiet" id="installBtn" type="button">تثبيت على الشاشة الرئيسية</button>
+  <button class="quiet" id="settingsBtn" type="button">الإعدادات</button>
+</footer>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+<noscript><p style="padding:16px">هذه الصفحة تحتاج تفعيل JavaScript.</p></noscript>
+<!-- To add SRI run:  curl -s URL | openssl dgst -sha384 -binary | openssl base64 -A   then add integrity="sha384-..." -->
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<script>
+(function () {
+  'use strict';
+  var CONFIG = {
+    FIREBASE_URL: "https://smart-garage-fdffd-default-rtdb.firebaseio.com",
+    API_KEY: "AIzaSyB2AtJEENsJVZQ-Rok-pjLADf0cSNSW2Ss",               // Firebase Web API key (enables Anonymous Auth). Required for secure rules.
+    DEFAULT_ZONE: "zone_1",
+    RATE_PER_HOUR: 20, OVER_MULTIPLIER: 2, GRACE_MIN: 2,
+    POLL_DEMO_MS: 3000, POLL_LIVE_MS: 15000,   // live updates come from the stream; polling is a fallback
+    CURRENCY: "جنيه"
+  };
+  var DB_RE = /^https:\/\/[a-z0-9-]+\.(?:[a-z0-9-]+\.)?(?:firebaseio\.com|firebasedatabase\.app)$/;
+
+/*LOGIC_START*/
+  var STATES = { available: { label: "متاح" }, reserved: { label: "محجوز" }, occupied: { label: "مشغول" }, overprice: { label: "تجاوز الوقت" } };
+  var SLOT_COUNT = 2;
+  var TOKEN_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";   // 32 chars: no O/0/I/1
+  var TOKEN_LEN = 6;
+  function slotKey(n) { return "slot" + n; }
+  function priceFor(minutes) { return Math.ceil(minutes / 60 * CONFIG.RATE_PER_HOUR); }
+  function overDue(slot, now) {
+    if (!slot || !slot.endAt || now <= slot.endAt) return 0;
+    return Math.ceil(Math.ceil((now - slot.endAt) / 60000) * CONFIG.RATE_PER_HOUR * CONFIG.OVER_MULTIPLIER / 60);
+  }
+  function makeToken() {   // crypto-secure; 256 % 32 == 0 so no modulo bias
+    var a = new Uint8Array(TOKEN_LEN), t = "";
+    crypto.getRandomValues(a);
+    for (var i = 0; i < TOKEN_LEN; i++) t += TOKEN_ALPHABET.charAt(a[i] % 32);
+    return t;
+  }
+  function qrPayload(n, token) { return "SG:" + n + ":" + token; }
+  function normalizeSlots(raw) {
+    var out = {};
+    for (var n = 1; n <= SLOT_COUNT; n++) {
+      var v = raw && raw[slotKey(n)], s = { status: "available" };
+      if (typeof v === "string" && STATES[v]) s.status = v;
+      else if (v && typeof v === "object") {
+        if (STATES[v.status]) s.status = v.status;
+        if (typeof v.owner === "string") s.owner = v.owner.slice(0, 40);
+        ["startAt", "endAt", "paid"].forEach(function (k) { if (typeof v[k] === "number" && isFinite(v[k])) s[k] = v[k]; });
+        if (v.overdueSettled === true) s.overdueSettled = true;
+      }
+      out[slotKey(n)] = s;
+    }
+    return out;
+  }
+  function fmtDur(ms) {
+    var m = Math.max(0, Math.ceil(ms / 60000)), h = Math.floor(m / 60), r = m % 60;
+    if (h && r) return h + " س " + r + " د";
+    return h ? h + " س" : r + " د";
+  }
+  function fmtTime(ts) { var d = new Date(ts); return ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2); }
+  function describe(slot, now) {
+    var st = slot.status, info = "", due = 0;
+    if (st === "available") info = "فارغ – يمكنك الحجز أو الركن الفوري";
+    else if (st === "reserved") {
+      if (slot.startAt && now < slot.startAt) info = "محجوز – يبدأ بعد " + fmtDur(slot.startAt - now) + " (" + fmtTime(slot.startAt) + ")";
+      else if (slot.endAt) info = "محجوز – في انتظار السيارة حتى " + fmtTime(slot.endAt);
+      else info = "محجوز";
+    } else if (st === "occupied") {
+      info = slot.endAt && now < slot.endAt ? "مشغول – المتبقي " + fmtDur(slot.endAt - now) + " (حتى " + fmtTime(slot.endAt) + ")" : "مشغول";
+      if (slot.overdueSettled) info += " – تم سداد الغرامة، المطلوب الخروج";
+    } else if (st === "overprice") { due = overDue(slot, now); info = "انتهى الوقت منذ " + fmtDur(now - (slot.endAt || now)); }
+    return { info: info, due: due };
+  }
+  function demoTick(slots, now) {
+    var changed = false;
+    Object.keys(slots).forEach(function (k) {
+      var s = slots[k];
+      if (s.status === "reserved" && s.endAt && now > s.endAt) { slots[k] = { status: "available" }; changed = true; }
+      else if (s.status === "occupied" && s.endAt && now > s.endAt) { s.status = "overprice"; delete s.overdueSettled; changed = true; }
+    });
+    return changed;
+  }
+/*LOGIC_END*/
+
+  /* ---------------- helpers ---------------- */
+  function $(id) { return document.getElementById(id); }
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+  function h(tag, props, kids) {
+    var e = document.createElement(tag);
+    if (props) Object.keys(props).forEach(function (k) {
+      var v = props[k];
+      if (v === false || v == null) return;
+      if (k === "class") e.className = v;
+      else if (k === "text") e.textContent = v;
+      else if (k.slice(0, 2) === "on") e.addEventListener(k.slice(2), v);
+      else e.setAttribute(k, v === true ? "" : v);
+    });
+    (kids || []).forEach(function (c) { if (c != null) e.appendChild(typeof c === "string" ? document.createTextNode(c) : c); });
+    return e;
+  }
+  var toastTimer;
+  function toast(msg, bad) {
+    var box = $("toast");
+    box.className = "toast" + (bad ? " bad" : ""); box.textContent = "";
+    box.appendChild(h("span", { text: msg }));
+    clearTimeout(toastTimer); toastTimer = setTimeout(function () { box.textContent = ""; }, 3500);
+  }
+  function sha256(s) {
+    if (!(window.crypto && crypto.subtle)) return Promise.reject(new Error("nocrypto"));
+    return crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)).then(function (b) {
+      return Array.prototype.map.call(new Uint8Array(b), function (x) { return ("0" + x.toString(16)).slice(-2); }).join("");
+    });
+  }
+
+  /* ---------------- context ---------------- */
+  var params = new URLSearchParams(location.search);
+  var zoneParam = params.get("zone") || CONFIG.DEFAULT_ZONE;
+  var zone = /^[A-Za-z0-9_-]{1,40}$/.test(zoneParam) ? zoneParam : CONFIG.DEFAULT_ZONE;
+  // the database URL can only come from CONFIG or the settings dialog (no ?db= parameter), and only firebase hosts are accepted
+  var dbCandidate = (lsGet("sg_db") || CONFIG.FIREBASE_URL || "").replace(/\/+$/, "");
+  var dbUrl = DB_RE.test(dbCandidate) ? dbCandidate : "";
+  var demo = params.get("demo") === "1" || !dbUrl;
+  var uid = lsGet("sg_uid");
+  if (!uid) { uid = "u" + Math.random().toString(36).slice(2, 10); lsSet("sg_uid", uid); }
+  var clockOffset = 0;                       // server time - device time
+  function nowMs() { return Date.now() + clockOffset; }
+
+  function mineAll() { try { return JSON.parse(lsGet("sg_mine") || "{}") || {}; } catch (e) { return {}; } }
+  function mineKey(n) { return zone + ":" + slotKey(n); }
+  function setMine(n, token, rec) { var m = mineAll(); m[mineKey(n)] = { t: token, rec: !!rec }; lsSet("sg_mine", JSON.stringify(m)); }
+  function clearMine(n) { var m = mineAll(); delete m[mineKey(n)]; lsSet("sg_mine", JSON.stringify(m)); }
+  function mineEntry(n) { var e = mineAll()[mineKey(n)]; return e && typeof e === "object" ? e : null; }
+  function isMine(n, slot) { var e = mineEntry(n); return !!e && slot.status !== "available" && (slot.owner === uid || e.rec); }
+
+  /* ---------------- Firebase auth (anonymous, REST) ---------------- */
+  var auth = { tok: null, exp: 0 };
+  function authReq(url, body, form) {
+    return fetch(url, { method: "POST", headers: { "Content-Type": form ? "application/x-www-form-urlencoded" : "application/json" }, body: body })
+      .then(function (r) { if (!r.ok) throw new Error("auth"); return r.json(); });
+  }
+  function fbAuth() {
+    if (demo || !CONFIG.API_KEY) return Promise.resolve(null);
+    if (auth.tok && Date.now() < auth.exp - 60000) return Promise.resolve(auth.tok);
+    var K = encodeURIComponent(CONFIG.API_KEY), rt = lsGet("sg_rt");
+    var p = rt
+      ? authReq("https://securetoken.googleapis.com/v1/token?key=" + K, "grant_type=refresh_token&refresh_token=" + encodeURIComponent(rt), true)
+          .then(function (d) { return { idToken: d.id_token, refreshToken: d.refresh_token, expiresIn: d.expires_in, localId: d.user_id }; })
+      : Promise.reject(new Error("none"));
+    return p.catch(function () { return authReq("https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=" + K, JSON.stringify({ returnSecureToken: true })); })
+      .then(function (d) {
+        auth.tok = d.idToken; auth.exp = Date.now() + Number(d.expiresIn) * 1000;
+        uid = d.localId; lsSet("sg_uid", uid); lsSet("sg_rt", d.refreshToken);
+        return auth.tok;
+      });
+  }
+
+  /* ---------------- backends ---------------- */
+  var slots = null, lastSig = "", selected = null;
+  function demoInitial() { return { slot1: { status: "available" }, slot2: { status: "available" } }; }
+  function demoLoad() { try { return JSON.parse(lsGet("sg_demo_" + zone)); } catch (e) { return null; } }
+  function demoSave() { lsSet("sg_demo_" + zone, JSON.stringify(slots)); }
+
+  function fbFetch(path, opts) {
+    return fbAuth().then(function (tok) {
+      var ctl = new AbortController(), t = setTimeout(function () { ctl.abort(); }, 8000);
+      opts = opts || {}; opts.signal = ctl.signal;
+      var url = dbUrl + "/zones/" + zone + path + ".json" + (tok ? "?auth=" + encodeURIComponent(tok) : "");
+      return fetch(url, opts).then(function (r) {
+        clearTimeout(t);
+        if (r.status === 412) { var e = new Error("etag"); e.etag = true; throw e; }
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json().then(function (d) { return { data: d, etag: r.headers.get("ETag") }; });
+      }, function (e) { clearTimeout(t); throw e; });
+    });
+  }
+  var JSON_H = { "Content-Type": "application/json" };
+  /* optimistic transaction: GET with ETag, compute, PUT with if-match; retry on conflict (HTTP 412) */
+  function txn(path, fn, tries) {
+    tries = tries == null ? 4 : tries;
+    return fbFetch(path, { headers: { "X-Firebase-ETag": "true" } }).then(function (g) {
+      var next = fn(g.data), hd = { "Content-Type": "application/json" };
+      if (g.etag) hd["if-match"] = g.etag;
+      return fbFetch(path, { method: "PUT", headers: hd, body: JSON.stringify(next) });
+    }).catch(function (e) { if (e && e.etag && tries > 0) return txn(path, fn, tries - 1); throw e; });
+  }
+
+  var backend = {
+    load: function () {
+      if (demo) {
+        if (!slots) slots = normalizeSlots(demoLoad() || demoInitial());
+        if (demoTick(slots, nowMs())) demoSave();
+        return Promise.resolve(slots);
+      }
+      return fbFetch("/slots").then(function (g) { return normalizeSlots(g.data || {}); });
+    },
+    book: function (n, record, hash) {
+      var k = slotKey(n);
+      if (demo) {
+        if (slots[k].status !== "available") return Promise.reject(new Error("taken"));
+        slots[k] = record; demoSave(); return Promise.resolve();
+      }
+      return txn("/slots/" + k, function (cur) {
+        if (cur && cur.status && cur.status !== "available") throw new Error("taken");
+        return record;
+      }).then(function () { return fbFetch("/secrets/" + k, { method: "PUT", headers: JSON_H, body: JSON.stringify({ hash: hash }) }); });
+    },
+    update: function (n, fn) {      // fn(currentSlot) -> new slot; atomic against concurrent edits
+      var k = slotKey(n);
+      if (demo) { slots[k] = fn(slots[k]); demoSave(); return Promise.resolve(); }
+      return txn("/slots/" + k, function (cur) { return fn(cur || {}); });
+    },
+    syncClock: function () {        // align with the Firebase server clock using a server timestamp
+      if (demo) return Promise.resolve();
+      var t0 = Date.now();
+      return fbFetch("/sync/" + uid, { method: "PUT", headers: JSON_H, body: JSON.stringify({ ".sv": "timestamp" }) }).then(function (g) {
+        if (typeof g.data === "number") clockOffset = g.data - (t0 + Date.now()) / 2;
+      }).catch(function () {});
+    }
+  };
+  function merge(cur, patch, drop) { var o = Object.assign({}, cur, patch); (drop || []).forEach(function (k) { delete o[k]; }); return o; }
+
+  /* live updates: Firebase streaming (Server-Sent Events) triggers a refresh; polling stays as a slow fallback */
+  function startStream() {
+    if (demo || !window.EventSource) return;
+    fbAuth().then(function (tok) {
+      var es = new EventSource(dbUrl + "/zones/" + zone + "/slots.json" + (tok ? "?auth=" + encodeURIComponent(tok) : "")), tm;
+      function bump() { clearTimeout(tm); tm = setTimeout(refresh, 300); }
+      es.addEventListener("put", bump); es.addEventListener("patch", bump);
+      es.onerror = function () { es.close(); setTimeout(startStream, 10000); };
+      setTimeout(function () { es.close(); startStream(); }, 50 * 60000);   // reconnect before the auth token expires
+    }).catch(function () { setTimeout(startStream, 15000); });
+  }
+
+  /* ---------------- rendering ---------------- */
+  function setConn(kind, text) { $("conn").className = "conn " + kind; $("connText").textContent = text; }
+  function svgIcon(d) {
+    var NS = "http://www.w3.org/2000/svg", svg = document.createElementNS(NS, "svg"), p = document.createElementNS(NS, "path");
+    svg.setAttribute("viewBox", "0 0 24 24"); svg.setAttribute("aria-hidden", "true");
+    p.setAttribute("d", d); p.setAttribute("fill-rule", "evenodd"); svg.appendChild(p); return svg;
+  }
+  var ICON_CAR = "M5 11l1.5-4.5A2 2 0 0 1 8.4 5h7.2a2 2 0 0 1 1.9 1.5L19 11h.5a1.5 1.5 0 0 1 1.5 1.5V17a1 1 0 0 1-1 1h-1v1.5a.5.5 0 0 1-.5.5h-2a.5.5 0 0 1-.5-.5V18H8v1.5a.5.5 0 0 1-.5.5h-2a.5.5 0 0 1-.5-.5V18H4a1 1 0 0 1-1-1v-4.5A1.5 1.5 0 0 1 4.5 11H5zm2.3 0h9.4l-1-3H8.3z";
+  var ICON_LOCK = "M7 10V8a5 5 0 0 1 10 0v2h1a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1zm2 0h6V8a3 3 0 0 0-6 0z";
+  function iconFor(st) { return st === "available" ? h("span", { class: "pmark", text: "P" }) : svgIcon(st === "reserved" ? ICON_LOCK : ICON_CAR); }
+  function tileSub(s, now, due) {
+    if (s.status === "reserved") return s.startAt && now < s.startAt ? "يبدأ " + fmtTime(s.startAt) : (s.endAt ? "حتى " + fmtTime(s.endAt) : "");
+    if (s.status === "occupied") return s.endAt && now < s.endAt ? "باقي " + fmtDur(s.endAt - now) : "";
+    if (s.status === "overprice") return due + " " + CONFIG.CURRENCY;
+    return "";
+  }
+  function buildDetail(m) {
+    var st = m.s.status, title = h("strong", { text: "الباكية " + m.n });
+    if (m.mine) title.appendChild(h("span", { class: "mine-tag", text: "حجزك" }));
+    var info = h("div", { class: "info" }, [m.info]);
+    if (st === "overprice") info.appendChild(h("div", { class: "due", text: "المستحق الآن: " + m.due + " " + CONFIG.CURRENCY }));
+    var actions = h("div", { class: "actions" });
+    if (m.mine && (st === "reserved" || st === "occupied")) {
+      actions.appendChild(h("button", { class: "primary", type: "button", text: "عرض الـ QR", onclick: function () { openQr(m.n); } }));
+      actions.appendChild(h("button", { class: "ghost", type: "button", text: "تمديد الوقت", onclick: function () { openExtend(m.n); } }));
+    } else if (m.mine && st === "overprice") {
+      actions.appendChild(h("button", { class: "danger", type: "button", text: "Pay Now وخروج", onclick: function () { openPayOver(m.n); } }));
+      actions.appendChild(h("button", { class: "ghost", type: "button", text: "تجديد المدة", onclick: function () { openExtend(m.n); } }));
+    } else info.appendChild(h("div", { class: "note", text: "هذا المكان غير متاح للحجز حاليًا. اختر مكانًا أخضر." }));
+    actions.appendChild(h("button", { class: "quiet", type: "button", text: "إخفاء", onclick: function () { selected = null; lastSig = ""; render(); } }));
+    return h("article", { class: "slot s-" + st }, [h("div", { class: "slot-top" }, [title, h("span", { class: "badge", text: STATES[st].label })]), info, actions]);
+  }
+  function onBay(n) {
+    var s = slots[slotKey(n)]; lastSig = "";
+    if (s.status === "available") { selected = null; render(); openBooking(n); return; }
+    selected = selected === n ? null : n; render();
+    if (selected) { try { $("detail").scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {} }
+  }
+  function render() {
+    if (!slots) return;
+    var now = nowMs(), counts = { available: 0, reserved: 0, occupied: 0 }, models = [];
+    for (var n = 1; n <= SLOT_COUNT; n++) {
+      var s = slots[slotKey(n)];
+      if (s.status === "available") { counts.available++; if (mineEntry(n)) clearMine(n); }
+      else if (s.status === "reserved") counts.reserved++; else counts.occupied++;
+      var d = describe(s, now);
+      models.push({ n: n, s: s, info: d.info, due: d.due, mine: isMine(n, s), sub: tileSub(s, now, d.due) });
+    }
+    if (selected && slots[slotKey(selected)].status === "available") selected = null;
+    var sig = JSON.stringify([selected, models.map(function (m) { return [m.n, m.s.status, m.info, m.due, m.mine, m.sub]; })]);
+    if (sig === lastSig) return;
+    lastSig = sig;
+    $("nAvail").textContent = counts.available; $("nRsv").textContent = counts.reserved; $("nOcc").textContent = counts.occupied;
+    var box = $("bays"); box.textContent = "";
+    models.forEach(function (m) {
+      var st = m.s.status, label = m.mine && st !== "overprice" ? "حجزك" : STATES[st].label;
+      box.appendChild(h("button", {
+        class: "bay s-" + st + (m.mine ? " mine" : ""), type: "button",
+        "aria-label": "الباكية " + m.n + "، " + STATES[st].label + (m.mine ? " (حجزك)" : ""),
+        "aria-pressed": String(selected === m.n), onclick: function () { onBay(m.n); }
+      }, [h("span", { class: "bay-icon" }, [iconFor(st)]), h("span", { class: "bay-name", text: "باكية " + m.n }), h("span", { class: "bay-state", text: label }), m.sub ? h("span", { class: "bay-sub", text: m.sub }) : null]));
+    });
+    var det = $("detail"); det.textContent = "";
+    if (selected) { det.hidden = false; det.appendChild(buildDetail(models[selected - 1])); } else det.hidden = true;
+    renderTools();
+  }
+  function renderTools() {
+    if (!demo) return;
+    var rows = $("toolRows"); rows.textContent = "";
+    for (var n = 1; n <= SLOT_COUNT; n++) (function (n) {
+      var s = slots[slotKey(n)], row = h("div", { class: "tool-row" }, [h("span", { text: "باكية " + n })]);
+      row.appendChild(h("button", { class: "quiet", type: "button", text: "وصول السيارة", disabled: s.status !== "reserved", onclick: function () { backend.update(n, function (c) { return merge(c, { status: "occupied" }); }).then(refresh); } }));
+      row.appendChild(h("button", { class: "quiet", type: "button", text: "انتهاء المدة", disabled: s.status !== "occupied" && s.status !== "reserved", onclick: function () { backend.update(n, function (c) { return merge(c, { endAt: nowMs() - 60000 }); }).then(refresh); } }));
+      row.appendChild(h("button", { class: "quiet", type: "button", text: "مغادرة", disabled: s.status === "available", onclick: function () { slots[slotKey(n)] = { status: "available" }; demoSave(); refresh(); } }));
+      rows.appendChild(row);
+    })(n);
+  }
+  function refresh() {
+    return backend.load().then(function (data) {
+      slots = data; setConn(demo ? "demo" : "live", demo ? "وضع تجريبي" : "متصل"); render();
+    }).catch(function () {
+      setConn("err", "تعذّر الاتصال");
+      if (!slots) { $("bays").textContent = ""; $("bays").appendChild(h("p", { class: "note", text: "تعذّر تحميل حالة الأماكن. تحقق من الاتصال ومن رابط Firebase." })); }
+    });
+  }
+
+  /* ---------------- modals ---------------- */
+  var closeCurrent = null;
+  function openModal(title, sub, bodyNodes, buttons) {
+    if (closeCurrent) closeCurrent();
+    var prevFocus = document.activeElement;
+    var sheet = h("div", { class: "sheet", role: "dialog", "aria-modal": "true", "aria-labelledby": "mTitle" }, [h("h3", { id: "mTitle", text: title }), sub ? h("p", { class: "sub", text: sub }) : null].concat(bodyNodes || []));
+    if (buttons && buttons.length) sheet.appendChild(h("div", { class: "sheet-actions" }, buttons));
+    var overlay = h("div", { class: "overlay", onclick: function (e) { if (e.target === overlay) close(); } }, [sheet]);
+    function onKey(e) { if (e.key === "Escape") close(); }
+    function close() {
+      document.removeEventListener("keydown", onKey);
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+      closeCurrent = null;
+      if (prevFocus && prevFocus.focus) { try { prevFocus.focus(); } catch (e) {} }
+    }
+    document.addEventListener("keydown", onKey);
+    document.body.appendChild(overlay);
+    var first = sheet.querySelector("button, select, input"); if (first) first.focus();
+    closeCurrent = close; return close;
+  }
+  function closeBtn(label) { return h("button", { class: "quiet", type: "button", text: label || "إغلاق", onclick: function () { if (closeCurrent) closeCurrent(); } }); }
+  function qrNode(text) {
+    if (typeof qrcode !== "function") return null;
+    try {
+      var q = qrcode(0, "M"); q.addData(text); q.make();
+      var n = q.getModuleCount(), m = 4, size = n + 2 * m, d = "";
+      for (var r = 0; r < n; r++) for (var c = 0; c < n; c++) if (q.isDark(r, c)) d += "M" + (c + m) + " " + (r + m) + "h1v1h-1z";
+      var NS = "http://www.w3.org/2000/svg", svg = document.createElementNS(NS, "svg"), bg = document.createElementNS(NS, "rect"), p = document.createElementNS(NS, "path");
+      svg.setAttribute("viewBox", "0 0 " + size + " " + size); svg.setAttribute("shape-rendering", "crispEdges"); svg.setAttribute("role", "img"); svg.setAttribute("aria-label", "كود QR");
+      bg.setAttribute("width", size); bg.setAttribute("height", size); bg.setAttribute("fill", "#ffffff");
+      p.setAttribute("d", d); p.setAttribute("fill", "#000000");
+      svg.appendChild(bg); svg.appendChild(p); return svg;
+    } catch (e) { return null; }
+  }
+  function openQr(n) {
+    var s = slots[slotKey(n)], e = mineEntry(n);
+    if (!e) { toast("لا يوجد تصريح محفوظ على هذا الجهاز. استخدم «استرجاع حجز».", true); return; }
+    var payload = qrPayload(n, e.t), node = qrNode(payload), body = [];
+    if (node) body.push(h("div", { class: "qrbox" }, [node]));
+    else body.push(h("p", { class: "note center", text: "تعذّر تحميل مكتبة الـ QR. اعرض هذا الكود نصياً:" }));
+    body.push(h("div", { class: "code", text: payload }));
+    body.push(h("p", { class: "note center", text: s.startAt && s.endAt ? "من " + fmtTime(s.startAt) + " إلى " + fmtTime(s.endAt) : "" }));
+    body.push(h("p", { class: "note center", text: "اعرضه أمام كاميرا الفون الخارجي عند المدخل لفتح ذراع الباكية " + n + ". يعمل للخروج والعودة طوال المدة المدفوعة. احتفظ بالكود نصيًا لاسترجاعه." }));
+    openModal("تصريح الدخول – الباكية " + n, "", body, [closeBtn()]);
+  }
+  function priceRow(initial) {
+    var b = h("b", { text: initial + " " + CONFIG.CURRENCY });
+    return { node: h("div", { class: "price" }, [h("span", { text: "الإجمالي" }), b]), set: function (v) { b.textContent = v + " " + CONFIG.CURRENCY; } };
+  }
+  function selectField(label, id, options, value) {
+    var sel = h("select", { id: id }, options.map(function (o) { return h("option", { value: o[0], text: o[1] }); }));
+    sel.value = String(value);
+    return { node: h("div", { class: "field" }, [h("label", { for: id, text: label }), sel]), sel: sel };
+  }
+  var DUR_OPTIONS = [[30, "30 دقيقة"], [60, "ساعة"], [120, "ساعتان"], [180, "3 ساعات"], [240, "4 ساعات"]];
+
+  function openBooking(n) {
+    var kind = "now";
+    var startF = selectField("وقت البدء", "fStart", [[30, "بعد 30 دقيقة"], [60, "بعد ساعة"], [120, "بعد ساعتين"], [180, "بعد 3 ساعات"]], 60);
+    startF.node.hidden = true;
+    var durF = selectField("المدة", "fDur", DUR_OPTIONS, 60), price = priceRow(priceFor(60));
+    var btnNow = h("button", { type: "button", "aria-pressed": "true", text: "ركن فوري", onclick: function () { setKind("now"); } });
+    var btnLater = h("button", { type: "button", "aria-pressed": "false", text: "حجز مسبق", onclick: function () { setKind("later"); } });
+    function setKind(k) { kind = k; btnNow.setAttribute("aria-pressed", String(k === "now")); btnLater.setAttribute("aria-pressed", String(k === "later")); startF.node.hidden = k === "now"; }
+    durF.sel.addEventListener("change", function () { price.set(priceFor(Number(durF.sel.value))); });
+    var pay = h("button", { class: "primary", type: "button", text: "ادفع (محاكاة)" });
+    pay.addEventListener("click", function () {
+      var dur = Number(durF.sel.value), startMin = kind === "now" ? 0 : Number(startF.sel.value), token = makeToken();
+      pay.disabled = true; pay.textContent = "جارٍ الدفع…";
+      var ready = demo ? Promise.resolve("") : fbAuth().then(function () { return backend.syncClock(); }).then(function () { return sha256(zone + ":" + n + ":" + token); });
+      ready.then(function (hash) {
+        var now = nowMs(), record = { status: "reserved", startAt: Math.round(now + startMin * 60000), endAt: Math.round(now + (startMin + dur) * 60000), paid: priceFor(dur), owner: uid };
+        return sleep(600).then(function () { return backend.book(n, record, hash); });
+      }).then(function () {
+        setMine(n, token, false); selected = n; lastSig = ""; return refresh();
+      }).then(function () { toast("تم الدفع وإصدار التصريح"); openQr(n); })
+      .catch(function (err) {
+        pay.disabled = false; pay.textContent = "ادفع (محاكاة)";
+        toast(err && err.message === "taken" ? "عذراً، تم حجز هذا المكان للتو" : "تعذّر إتمام الحجز، حاول مرة أخرى", true); refresh();
+      });
+    });
+    openModal("حجز الباكية " + n, "اختر نوع الحجز والمدة ثم ادفع للحصول على كود QR.", [
+      h("div", { class: "field" }, [h("div", { class: "seg", role: "group", "aria-label": "نوع الحجز" }, [btnNow, btnLater])]), startF.node, durF.node, price.node
+    ], [pay, closeBtn("إلغاء")]);
+  }
+  function openExtend(n) {
+    var s = slots[slotKey(n)], overdue = s.status === "overprice" ? overDue(s, nowMs()) : 0;
+    var durF = selectField("إضافة مدة", "fExt", [[30, "30 دقيقة"], [60, "ساعة"], [120, "ساعتان"]], 30);
+    function total() { return priceFor(Number(durF.sel.value)) + overdue; }
+    var price = priceRow(total());
+    durF.sel.addEventListener("change", function () { price.set(total()); });
+    var pay = h("button", { class: "primary", type: "button", text: "ادفع ومدّد (محاكاة)" });
+    pay.addEventListener("click", function () {
+      var add = Number(durF.sel.value) * 60000, mins = Number(durF.sel.value);
+      pay.disabled = true; pay.textContent = "جارٍ الدفع…";
+      sleep(600).then(function () {
+        return backend.update(n, function (cur) {      // evaluated on the freshest data, so paid never gets overwritten
+          var now = nowMs(), od = cur.status === "overprice" ? overDue(cur, now) : 0, cost = priceFor(mins) + od;
+          return od ? merge(cur, { endAt: Math.round(now + add), paid: (cur.paid || 0) + cost, status: "occupied" }, ["overdueSettled"])
+                    : merge(cur, { endAt: Math.round((cur.endAt || now) + add), paid: (cur.paid || 0) + cost });
+        });
+      }).then(refresh).then(function () { toast("تم تمديد الوقت"); if (closeCurrent) closeCurrent(); })
+      .catch(function () { pay.disabled = false; pay.textContent = "ادفع ومدّد (محاكاة)"; toast("تعذّر التمديد", true); });
+    });
+    var sub = overdue ? "سيُسدَّد الـ Overprice المستحق (" + overdue + " " + CONFIG.CURRENCY + ") مع المدة الجديدة." : "التمديد بالسعر العادي طالما لم ينتهِ وقتك.";
+    openModal("تمديد وقت الباكية " + n, sub, [durF.node, price.node], [pay, closeBtn("إلغاء")]);
+  }
+  function openPayOver(n) {
+    var due = overDue(slots[slotKey(n)], nowMs()), price = priceRow(due);
+    var pay = h("button", { class: "danger", type: "button", text: "Pay Now (محاكاة)" });
+    pay.addEventListener("click", function () {
+      pay.disabled = true; pay.textContent = "جارٍ الدفع…";
+      sleep(600).then(function () {
+        return backend.update(n, function (cur) {
+          var now = nowMs();
+          return merge(cur, { endAt: Math.round(now + CONFIG.GRACE_MIN * 60000), paid: (cur.paid || 0) + overDue(cur, now), status: "occupied", overdueSettled: true });
+        });
+      }).then(refresh).then(function () { toast("تم السداد – اعرض الـ QR لفتح الذراع والخروج"); openQr(n); })
+      .catch(function () { pay.disabled = false; pay.textContent = "Pay Now (محاكاة)"; toast("تعذّر السداد", true); });
+    });
+    openModal("سداد الـ Overprice – الباكية " + n, "انتهت مدتك والسيارة بالداخل. بعد السداد يُفعَّل الكود ويُفتح الذراع للخروج خلال " + CONFIG.GRACE_MIN + " دقيقة.", [price.node], [pay, closeBtn("إلغاء")]);
+  }
+  function openRecover() {
+    var slotF = selectField("رقم الباكية", "fRSlot", [[1, "باكية 1"], [2, "باكية 2"]], 1);
+    var input = h("input", { type: "text", id: "fRCode", placeholder: "K7Q9AB أو SG:2:K7Q9AB", autocomplete: "off", autocapitalize: "characters" });
+    var go = h("button", { class: "primary", type: "button", text: "استرجاع", onclick: function () {
+      var raw = input.value.trim().toUpperCase(), m = /^SG:(\d+):(.+)$/.exec(raw), n = Number(slotF.sel.value), tok = raw;
+      if (m) { n = Number(m[1]); tok = m[2]; }
+      if (!(n >= 1 && n <= SLOT_COUNT) || !new RegExp("^[" + TOKEN_ALPHABET + "]{" + TOKEN_LEN + "}$").test(tok)) { toast("الكود غير صحيح", true); return; }
+      if (slots[slotKey(n)].status === "available") { toast("هذه الباكية غير محجوزة", true); return; }
+      setMine(n, tok, true); selected = n; lastSig = ""; render(); openQr(n);
+    } });
+    openModal("استرجاع حجز", "أدخل الكود الذي حصلت عليه عند الدفع لعرض الـ QR مجددًا. التمديد يتطلب نفس الجهاز الذي حجز منه.", [slotF.node, h("div", { class: "field" }, [h("label", { for: "fRCode", text: "كود الحجز" }), input])], [go, closeBtn("إلغاء")]);
+  }
+  function openSettings() {
+    var input = h("input", { type: "url", id: "fDb", placeholder: "https://<project>-default-rtdb.firebaseio.com", value: lsGet("sg_db") || CONFIG.FIREBASE_URL || "", autocomplete: "off" });
+    var save = h("button", { class: "primary", type: "button", text: "حفظ وإعادة التحميل", onclick: function () {
+      var v = input.value.trim().replace(/\/+$/, "");
+      if (v && !DB_RE.test(v)) { toast("الرابط يجب أن يكون رابط Firebase (firebaseio.com أو firebasedatabase.app)", true); return; }
+      lsSet("sg_db", v); location.reload();
+    } });
+    openModal("الإعدادات", "اترك الخانة فارغة لاستخدام الوضع التجريبي.", [
+      h("div", { class: "field" }, [h("label", { for: "fDb", text: "رابط Firebase Realtime Database" }), input]),
+      h("p", { class: "note", text: "يُحفظ على هذا الجهاز فقط." })
+    ], [save, closeBtn("إلغاء")]);
+  }
+  var deferredInstall = null;
+  window.addEventListener("beforeinstallprompt", function (e) { e.preventDefault(); deferredInstall = e; });
+  function onInstall() {
+    if (deferredInstall) { deferredInstall.prompt(); deferredInstall = null; return; }
+    openModal("التثبيت على الشاشة الرئيسية", "اختياري – يفتح الصفحة كتطبيق بضغطة واحدة.", [
+      h("p", { class: "note", text: "أندرويد (Chrome): القائمة ⋮ ثم «تثبيت التطبيق» أو «إضافة إلى الشاشة الرئيسية»." }),
+      h("p", { class: "note", text: "آيفون (Safari): زر المشاركة ثم «إضافة إلى الشاشة الرئيسية»." })
+    ], [closeBtn()]);
+  }
+
+  /* ---------------- start ---------------- */
+  $("zoneLine").textContent = "المنطقة: " + zone;
+  $("lotZone").textContent = zone;
+  $("installBtn").addEventListener("click", onInstall);
+  $("settingsBtn").addEventListener("click", openSettings);
+  $("recoverBtn").addEventListener("click", function () { if (slots) openRecover(); });
+  var b = $("banner");
+  if (demo) {
+    b.hidden = false; b.textContent = "وضع تجريبي: البيانات محلية على جهازك. أضف رابط Firebase من «الإعدادات» للربط الحقيقي مع الـ ESP32.";
+    $("tools").hidden = false;
+    $("resetDemo").addEventListener("click", function () { slots = normalizeSlots(demoInitial()); demoSave(); lastSig = ""; refresh(); toast("تمت إعادة ضبط التجربة"); });
+  } else if (!CONFIG.API_KEY) {
+    b.hidden = false; b.textContent = "تنبيه: لم يُضبط API_KEY، لذا تعمل الصفحة بدون تسجيل دخول مجهول وقواعد Firebase يجب أن تكون مفتوحة. غير آمن للإنتاج.";
+  }
+  refresh().then(function () { return backend.syncClock(); }).then(render);
+  startStream();
+  setInterval(refresh, demo ? CONFIG.POLL_DEMO_MS : CONFIG.POLL_LIVE_MS);
+  setInterval(render, 5000);
+  setInterval(function () { backend.syncClock(); }, 10 * 60000);
+})();
+</script>
+</body>
+</html>

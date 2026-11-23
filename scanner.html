@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ماسح بوابة الجراج</title>
+<!-- Open on the gate phone:  scanner.html?zone=zone_1  (needs https for the camera) -->
+<style>
+:root{--bg:#f3f6fb;--surface:#fff;--ink:#14213d;--muted:#5a6a82;--line:#dfe6f0;--brand:#0e7cc4;--ok:#15803d;--bad:#b91c1c;color-scheme:light}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0b1220;--surface:#141d30;--ink:#e8eef8;--muted:#9db0c9;--line:#26344d;--brand:#38a9ee;--ok:#4ade80;--bad:#f87171;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#0b1220;--surface:#141d30;--ink:#e8eef8;--muted:#9db0c9;--line:#26344d;--brand:#38a9ee;--ok:#4ade80;--bad:#f87171}
+*{box-sizing:border-box}[hidden]{display:none!important}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:"Segoe UI",Tahoma,"Noto Sans Arabic",system-ui,sans-serif;padding:env(safe-area-inset-top,0) 0 env(safe-area-inset-bottom,0)}
+main{max-width:520px;margin:0 auto;padding:14px;display:grid;gap:12px}
+h1{font-size:19px;margin:6px 2px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px;display:grid;gap:10px}
+video{width:100%;aspect-ratio:1/1;object-fit:cover;border-radius:14px;background:#000}
+input{font:inherit;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--ink);width:100%;min-height:44px;direction:ltr;text-align:left}
+button{font:inherit;font-weight:600;border-radius:10px;border:0;padding:10px 14px;min-height:44px;background:var(--brand);color:#fff;cursor:pointer}
+button[disabled]{opacity:.6}
+:focus-visible{outline:3px solid var(--brand);outline-offset:2px}
+#res{border-radius:14px;padding:18px;text-align:center;font-size:20px;font-weight:700;border:2px solid var(--line);min-height:70px;display:flex;align-items:center;justify-content:center}
+#res.ok{border-color:var(--ok);color:var(--ok)}#res.bad{border-color:var(--bad);color:var(--bad)}
+.note{font-size:12.5px;color:var(--muted)}
+</style>
+</head>
+<body>
+<main>
+  <h1>ماسح بوابة الجراج <span class="note" id="zl"></span></h1>
+  <section id="login" class="card" hidden>
+    <p class="note">سجّل دخول حساب الماسح (مرة واحدة على هذا الهاتف).</p>
+    <input id="pw" type="password" placeholder="كلمة مرور حساب الماسح" autocomplete="current-password">
+    <button id="loginBtn" type="button">دخول</button>
+  </section>
+  <section id="scan" hidden>
+    <video id="vid" playsinline muted></video>
+    <div id="res" role="status" aria-live="polite">وجّه الكاميرا نحو كود QR</div>
+    <div class="card">
+      <input id="manual" type="text" placeholder="أو اكتب الكود: SG:1:K7Q9AB" autocapitalize="characters" autocomplete="off">
+      <button id="sendBtn" type="button">إرسال الكود</button>
+    </div>
+  </section>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<script>
+(function () {
+  'use strict';
+  var CONFIG = {
+    FIREBASE_URL: "https://smart-garage-fdffd-default-rtdb.firebaseio.com",
+    API_KEY: "AIzaSyB2AtJEENsJVZQ-Rok-pjLADf0cSNSW2Ss",                                  // Firebase Web API key
+    SCANNER_EMAIL: "scanner@garage.local",        // user created in Firebase Authentication (email/password)
+    DEFAULT_ZONE: "zone_1"
+  };
+  function $(id) { return document.getElementById(id); }
+  function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  var zp = new URLSearchParams(location.search).get("zone") || CONFIG.DEFAULT_ZONE;
+  var zone = /^[A-Za-z0-9_-]{1,40}$/.test(zp) ? zp : CONFIG.DEFAULT_ZONE;
+  $("zl").textContent = "– " + zone;
+  var db = CONFIG.FIREBASE_URL.replace(/\/+$/, ""), K = encodeURIComponent(CONFIG.API_KEY);
+  var tok = null, exp = 0;
+
+  function post(url, body, form) {
+    return fetch(url, { method: "POST", headers: { "Content-Type": form ? "application/x-www-form-urlencoded" : "application/json" }, body: body })
+      .then(function (r) { if (!r.ok) throw new Error("auth"); return r.json(); });
+  }
+  function saveTok(idToken, rt, secs) { tok = idToken; exp = Date.now() + Number(secs) * 1000; lsSet("sg_scan_rt", rt); }
+  function getTok() {
+    if (tok && Date.now() < exp - 60000) return Promise.resolve(tok);
+    var rt = lsGet("sg_scan_rt");
+    if (!rt) return Promise.reject(new Error("login"));
+    return post("https://securetoken.googleapis.com/v1/token?key=" + K, "grant_type=refresh_token&refresh_token=" + encodeURIComponent(rt), true)
+      .then(function (d) { saveTok(d.id_token, d.refresh_token, d.expires_in); return tok; });
+  }
+  function fb(path, opts) {
+    return getTok().then(function (t) {
+      return fetch(db + "/zones/" + zone + path + ".json?auth=" + encodeURIComponent(t), opts).then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+      });
+    });
+  }
+
+  var res = $("res"), busy = false, lastCode = "", lastAt = 0;
+  function show(kind, msg) {
+    res.className = kind; res.textContent = msg;
+    if (navigator.vibrate) navigator.vibrate(kind === "ok" ? 120 : [80, 60, 80]);
+  }
+  function send(code) {
+    code = code.trim().toUpperCase();
+    if (busy) return;
+    if (!/^SG:\d{1,2}:[A-Z0-9]{4,12}$/.test(code)) { show("bad", "كود غير معروف"); return; }
+    if (code === lastCode && Date.now() - lastAt < 4000) return;
+    busy = true; lastCode = code; lastAt = Date.now();
+    var id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    res.className = ""; res.textContent = "جارٍ التحقق…";
+    fb("/scan", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: id, code: code }) })
+      .then(function () { return waitResult(id, 12); })
+      .then(function (r) { show(r.ok ? "ok" : "bad", r.msg || (r.ok ? "تم" : "مرفوض")); })
+      .catch(function (e) { show("bad", e && e.message === "login" ? "سجّل الدخول من جديد" : "تعذّر الاتصال بالبوابة"); })
+      .then(function () { return sleep(2500); })
+      .then(function () { busy = false; });
+  }
+  function waitResult(id, tries) {
+    return fb("/scan_result").then(function (r) {
+      if (r && r.id === id) return r;
+      if (tries <= 0) throw new Error("timeout");
+      return sleep(700).then(function () { return waitResult(id, tries - 1); });
+    });
+  }
+
+  var video = $("vid"), canvas = document.createElement("canvas"), ctx = canvas.getContext("2d", { willReadFrequently: true });
+  var detector = window.BarcodeDetector ? new BarcodeDetector({ formats: ["qr_code"] }) : null;
+  function loop() {
+    if (!busy && video.readyState >= 2) {
+      if (detector) {
+        detector.detect(video).then(function (r) { if (r[0]) send(r[0].rawValue); }).catch(function () {});
+      } else if (window.jsQR && video.videoWidth) {
+        canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+        ctx.drawImage(video, 0, 0);
+        var img = ctx.getImageData(0, 0, canvas.width, canvas.height), q = jsQR(img.data, img.width, img.height);
+        if (q && q.data) send(q.data);
+      }
+    }
+    setTimeout(loop, 200);
+  }
+  function startCam() {
+    $("login").hidden = true; $("scan").hidden = false;
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false }).then(function (s) {
+      video.srcObject = s; return video.play();
+    }).then(loop).catch(function () { show("bad", "تعذّر فتح الكاميرا. استخدم https وامنح الإذن، أو اكتب الكود يدويًا."); });
+  }
+
+  $("sendBtn").addEventListener("click", function () { send($("manual").value); });
+  $("loginBtn").addEventListener("click", function () {
+    var b = $("loginBtn"); b.disabled = true;
+    post("https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=" + K, JSON.stringify({ email: CONFIG.SCANNER_EMAIL, password: $("pw").value, returnSecureToken: true }))
+      .then(function (d) { saveTok(d.idToken, d.refreshToken, d.expiresIn); $("pw").value = ""; startCam(); })
+      .catch(function () { b.disabled = false; alert("بيانات الدخول غير صحيحة"); });
+  });
+  getTok().then(startCam).catch(function () { $("login").hidden = false; });
+})();
+</script>
+</body>
+</html>
